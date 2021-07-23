@@ -6,17 +6,21 @@ from srctools import Side
 __all__ = [
     'MaterialGroup',
 
-    'ItemClass', 'MusicChannel',
+    'MusicChannel',
 
     'WhitePan', 'BlackPan',
     'Signage', 'Antlines',
     'Goo', 'Fizzler',
     'Special', 'Tools',
     'FixupVars',
+    'COUNTER_AND_ON', 'COUNTER_AND_OFF',
+    'COUNTER_OR_ON', 'COUNTER_OR_OFF',
+    'SEL_ICON_SIZE', 'SEL_ICON_SIZE_LRG',
 ]
 
 
 class MaterialGroupMeta(EnumMeta):
+    """Metaclass for MaterialGroup, to implement some of its features."""
     @classmethod
     def __prepare__(mcs, cls, bases):
         """Override Enum class-dict type.
@@ -25,16 +29,17 @@ class MaterialGroupMeta(EnumMeta):
         """
         # The original class is private - grab it via prepare, and make
         # a subclass right here.
-        orig_dict = type(super().__prepare__(cls, bases))
+        namespace = super().__prepare__(cls, bases)
 
-        class RepDict(orig_dict):
+        class RepDict(type(namespace)):
             def __setitem__(self, key, value):
                 if isinstance(value, str):
                     value = value.casefold()
                 super().__setitem__(key, value)
-        
-        return RepDict()
-        
+
+        namespace.__type__ = RepDict
+        return namespace
+
     def __contains__(cls, value) -> bool:
         """MaterialGroup can check if strings are equal to a member."""
         if isinstance(value, str):
@@ -118,53 +123,6 @@ class FixupVars(MaterialGroup):
     BEE_GLS_TYPE = '$barrier_type'
     BEE_PIST_IS_STATIC = '$is_static'
     BEE_PIST_MANAGER_A = '$manager_a'
-
-
-class ItemClass(MaterialGroup):
-    """PeTI item classes."""
-    # Default
-    UNCLASSED = 'ItemBase'
-
-    FLOOR_BUTTON = 'ItemButtonFloor'
-    PEDESTAL_BUTTON = 'ItemPedestalButton'
-
-    PANEL_STAIR = 'ItemStairs'
-    PANEL_FLIP = 'ItemPanelFlip'
-    PANEL_ANGLED = 'ItemAngledPanel'  # Both items
-    PISTON_PLATFORM = 'ItemPistonPlatform'
-    TRACK_PLATFORM = 'ItemRailPlatform'
-
-    CUBE = 'ItemCube'
-    GEL = PAINT = 'ItemPaintSplat'
-    FAITH_PLATE = 'ItemCatapult'
-
-    CUBE_DROPPER = 'ItemCubeDropper'
-    GEL_DROPPER = PAINT_DROPPER = 'ItemPaintDropper'
-    FAITH_TARGET = 'ItemCatapultTarget'
-
-    # Input-less items
-    GLASS = 'ItemBarrier'
-    TURRET = 'ItemTurret'
-    LIGHT_STRIP = 'ItemLightStrip'
-    GOO = 'ItemGoo'
-
-    # Items with inputs
-    LASER_EMITTER = 'ItemLaserEmitter'
-    FUNNEL = 'ItemTBeam'
-    FIZZLER = 'ItemBarrierHazard'
-    LIGHT_BRIDGE = 'ItemLightBridge'
-
-    # Extent/handle pseudo-items
-    HANDLE_FIZZLER = 'ItemBarrierHazardExtent'
-    HANDLE_GLASS = 'ItemBarrierExtent'
-    HANDLE_PISTON_PLATFORM = 'ItemPistonPlatformExtent'
-    HANDLE_TRACK_PLATFORM = 'ItemRailPlatformExtent'
-
-    # Entry/Exit corridors
-    DOOR_ENTRY_SP = 'ItemEntranceDoor'
-    DOOR_ENTRY_COOP = 'ItemCoopEntranceDoor'
-    DOOR_EXIT_SP = 'ItemExitDoor'
-    DOOR_EXIT_COOP = 'ItemCoopExitDoor'
 
 
 class WhitePan(MaterialGroup):
@@ -261,3 +219,15 @@ class MusicChannel(Enum):
     TBEAM = 'tbeam'  # Funnel audio
     BOUNCE = 'bouncegel'  # Jumping on repulsion gel.
     SPEED = 'speedgel'  # Moving fast horizontally
+
+
+# Outputs we need to use to make a math_counter act like
+# the specified logic gate.
+COUNTER_AND_ON = 'OnHitMax'
+COUNTER_AND_OFF = 'OnChangedFromMax'
+
+COUNTER_OR_ON = 'OnChangedFromMin'
+COUNTER_OR_OFF = 'OnHitMin'
+
+SEL_ICON_SIZE = 96  # Size of the selector win icons
+SEL_ICON_SIZE_LRG = (256, 192)  # Size of the larger icon shown in description.

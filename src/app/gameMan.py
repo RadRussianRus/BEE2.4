@@ -5,7 +5,9 @@ Does stuff related to the actual games.
 - Modifying GameInfo to support our special content folder.
 - Generating and saving editoritems/vbsp_config
 """
+from __future__ import annotations
 from pathlib import Path
+from collections.abc import Iterable, Iterator
 
 from tkinter import *  # ui library
 from tkinter import filedialog  # open/save as dialog creator
@@ -16,23 +18,28 @@ import shutil
 import math
 import re
 import io
+import pickle
+import pickletools
+import copy
+import webbrowser
+from atomicwrites import atomic_write
 
 from BEE2_config import ConfigFile, GEN_OPTS
 from srctools import (
-    Vec, VPK,
+    Vec, VPK, Vec_tuple,
     Property,
     VMF, Output,
     FileSystem, FileSystemChain,
 )
 import srctools.logger
-from app import backup, optionWindow, tk_tools, TK_ROOT
+from app import backup, optionWindow, tk_tools, TK_ROOT, resource_gen
 import loadScreen
-import packageLoader
+import packages.template_brush
+import editoritems
 import utils
 import srctools
-import webbrowser
 
-from typing import List, Tuple, Set, Iterable, Iterator, Dict, Union
+from typing import Optional, Union, Any, Type, IO
 
 
 try:
@@ -44,10 +51,10 @@ except ImportError:
 
 LOGGER = srctools.logger.get_logger(__name__)
 
-all_games = []  # type: List[Game]
-selected_game = None  # type: Game
+all_games: list[Game] = []
+selected_game: Optional[Game] = None
 selectedGame_radio = IntVar(value=0)
-game_menu = None  # type: Menu
+game_menu: Optional[Menu] = None
 
 # Translated text from basemodui.txt.
 TRANS_DATA = {}
@@ -140,9 +147,9 @@ res_system = FileSystemChain()
 
 # We search for Tag and Mel's music files, and copy them to games on export.
 # That way they can use the files.
-MUSIC_MEL_VPK = None  # type: VPK
-MUSIC_TAG_LOC = None  # type: str
-TAG_COOP_INST_VMF = None  # type: VMF
+MUSIC_MEL_VPK: Optional[VPK] = None
+MUSIC_TAG_LOC: Optional[str] = None
+TAG_COOP_INST_VMF: Optional[VMF] = None
 
 # The folder with the file...
 MUSIC_MEL_DIR = 'Portal Stories Mel/portal_stories/pak01_dir.vpk'
@@ -267,8 +274,9 @@ def should_backup_app(file: str) -> bool:
 
         # Read out the last 4096 bytes, and look for the sig in there.
         f.seek(-SIZE, io.SEEK_END)
-
-        return b'MEI\014\013\012\013\016' not in f.read(SIZE)
+        end_data = f.read(SIZE)
+        # We also look for BenVlodgi, to catch the BEE 1.06 precompiler.
+        return b'BenVlodgi' not in end_data and b'MEI\014\013\012\013\016' not in end_data
 
 
 class Game:
@@ -277,7 +285,7 @@ class Game:
         name: str,
         steam_id: str,
         folder: str,
-        mod_times: Dict[str, int],
+        mod_times: dict[str, int],
     ) -> None:
         self.name = name
         self.steamID = steam_id
@@ -347,7 +355,7 @@ class Game:
 
     def add_editor_sounds(
         self,
-        sounds: Iterable[packageLoader.EditorSound],
+        sounds: Iterable[packages.EditorSound],
     ) -> None:
         """Add soundscript items so they can be used in the editor."""
         # PeTI only loads game_sounds_editor, so we must modify that.
@@ -368,8 +376,8 @@ class Game:
                 'game_sounds_editor.txt',
             ))
         try:
-            with open(file, encoding='utf8') as f:
-                file_data = list(f)
+            with open(file, encoding='utf8') as f1:
+                file_data = list(f1)
         except FileNotFoundError:
             # If the file doesn't exist, we'll just write our stuff in.
             file_data = []
@@ -377,9 +385,10 @@ class Game:
             if line.strip() == EDITOR_SOUND_LINE:
                 # Delete our marker line and everything after it
                 del file_data[i:]
+                break
 
         # Then add our stuff!
-        with srctools.AtomicWriter(file) as f:
+        with atomic_write(file, overwrite=True, encoding='utf8') as f:
             f.writelines(file_data)
             f.write(EDITOR_SOUND_LINE + '\n')
             for sound in sounds:
@@ -430,7 +439,7 @@ class Game:
                         )
                     continue
 
-                with srctools.AtomicWriter(info_path) as file:
+                with atomic_write(info_path, overwrite=True, encoding='utf8') as file:
                     for line in data:
                         file.write(line)
         if not add_line:
@@ -455,6 +464,7 @@ class Game:
         if they're in instances.
         Add_line determines if we are adding or removing it.
         """
+        file: IO[bytes]
         # We do this in binary to ensure non-ASCII characters pass though
         # untouched.
 
@@ -480,7 +490,7 @@ class Game:
                 del data[i:]
                 break
 
-        with srctools.AtomicWriter(fgd_path, is_bytes=True) as file:
+        with atomic_write(fgd_path, overwrite=True, mode='wb') as file:
             for line in data:
                 file.write(line)
             if add_lines:
@@ -501,18 +511,18 @@ class Game:
             return False
 
         # Check lengths, to ensure we re-extract if packages were removed.
-        if len(packageLoader.packages) != len(self.mod_times):
+        if len(packages.packages) != len(self.mod_times):
             LOGGER.info('Need to extract - package counts inconsistent!')
             return True
 
         if any(
             pack.is_stale(self.mod_times.get(pack_id.casefold(), 0))
             for pack_id, pack in
-            packageLoader.packages.items()
+            packages.packages.items()
         ):
             return True
 
-    def refresh_cache(self, already_copied: Set[str]) -> None:
+    def refresh_cache(self, already_copied: set[str]) -> None:
         """Copy over the resource files into this game.
 
         already_copied is passed from copy_mod_music(), to
@@ -567,7 +577,7 @@ class Game:
 
         # Save the new cache modification date.
         self.mod_times.clear()
-        for pack_id, pack in packageLoader.packages.items():
+        for pack_id, pack in packages.packages.items():
             self.mod_times[pack_id.casefold()] = pack.get_modtime()
         self.save()
         CONFIG.save_check()
@@ -579,7 +589,7 @@ class Game:
         shutil.rmtree(self.abs_path('bin/bee2/'), ignore_errors=True)
 
         try:
-            packageLoader.StyleVPK.clear_vpk_files(self)
+            packages.StyleVPK.clear_vpk_files(self)
         except PermissionError:
             pass
 
@@ -587,10 +597,10 @@ class Game:
 
     def export(
         self,
-        style: packageLoader.Style,
-        selected_objects: dict,
+        style: packages.Style,
+        selected_objects: dict[Type[packages.PakObject], Any],
         should_refresh=False,
-    ) -> Tuple[bool, bool]:
+    ) -> tuple[bool, bool]:
         """Generate the editoritems.txt and vbsp_config.
 
         - If no backup is present, the original editoritems is backed up.
@@ -603,11 +613,11 @@ class Game:
         LOGGER.info('Exporting Items and Style for "{}"!', self.name)
 
         LOGGER.info('Style = {}', style.id)
-        for obj, selected in selected_objects.items():
+        for obj_type, selected in selected_objects.items():
             # Skip the massive dict in items
-            if obj == 'Item':
+            if obj_type is packages.Item:
                 selected = selected[0]
-            LOGGER.info('{} = {}', obj, selected)
+            LOGGER.info('{} = {}', obj_type, selected)
 
         # VBSP, VRAD, editoritems
         export_screen.set_length('BACK', len(FILES_TO_BACKUP))
@@ -640,10 +650,12 @@ class Game:
         # Editoritems
         # VBSP_config
         # Instance list
-        # Editor models.
+        # Editor models
+        # Template file
         # FGD file
         # Gameinfo
-        export_screen.set_length('EXP', len(packageLoader.OBJ_TYPES) + 6)
+        # Misc resources
+        export_screen.set_length('EXP', len(packages.OBJ_TYPES) + 8)
 
         # Do this before setting music and resources,
         # those can take time to compute.
@@ -654,7 +666,7 @@ class Game:
                 # Count the files.
                 export_screen.set_length(
                     'RES',
-                    sum(1 for file in res_system.walk_folder_repeat()),
+                    sum(1 for _ in res_system.walk_folder_repeat()),
                 )
             else:
                 export_screen.skip_stage('RES')
@@ -664,32 +676,42 @@ class Game:
             os.makedirs(self.abs_path('bin/bee2/'), exist_ok=True)
 
             # Start off with the style's data.
-            editoritems, vbsp_config = style.export()
+            vbsp_config = Property(None, [])
+            vbsp_config += style.config.copy()
+
+            all_items = style.items.copy()
+            renderables = style.renderables.copy()
+            resources: dict[str, bytes] = {}
+
             export_screen.step('EXP')
 
             vpk_success = True
 
             # Export each object type.
-            for obj_name, obj_data in packageLoader.OBJ_TYPES.items():
-                if obj_name == 'Style':
+            for obj_type in packages.OBJ_TYPES.values():
+                if obj_type is packages.Style:
                     continue  # Done above already
 
-                LOGGER.info('Exporting "{}"', obj_name)
-                selected = selected_objects.get(obj_name, None)
+                LOGGER.info('Exporting "{}"', obj_type.__name__)
 
                 try:
-                    obj_data.cls.export(packageLoader.ExportData(
+                    obj_type.export(packages.ExportData(
                         game=self,
-                        selected=selected,
-                        editoritems=editoritems,
+                        selected=selected_objects.get(obj_type, None),
+                        all_items=all_items,
+                        renderables=renderables,
                         vbsp_conf=vbsp_config,
                         selected_style=style,
+                        resources=resources,
                     ))
-                except packageLoader.NoVPKExport:
+                except packages.NoVPKExport:
                     # Raised by StyleVPK to indicate it failed to copy.
                     vpk_success = False
 
                 export_screen.step('EXP')
+
+            packages.template_brush.write_templates(self)
+            export_screen.step('EXP')
 
             vbsp_config.set_key(('Options', 'Game_ID'), self.steamID)
             vbsp_config.set_key(('Options', 'dev_mode'), srctools.bool_as_int(optionWindow.DEV_MODE.get()))
@@ -765,27 +787,19 @@ class Game:
             # Backup puzzles, if desired
             backup.auto_backup(selected_game, export_screen)
 
-            # This is the connection "heart" and "error" models.
-            # These have to come last, so we need to special case it.
-            editoritems += style.editor.find_key("Renderables", []).copy()
-
             # Special-case: implement the UnlockDefault stlylevar here,
             # so all items are modified.
-            if selected_objects['StyleVar']['UnlockDefault']:
+            if selected_objects[packages.StyleVar]['UnlockDefault']:
                 LOGGER.info('Unlocking Items!')
-                for item in editoritems.find_all('Item'):
+                for i, item in enumerate(all_items):
                     # If the Unlock Default Items stylevar is enabled, we
                     # want to force the corridors and obs room to be
                     # deletable and copyable
                     # Also add DESIRES_UP, so they place in the correct orientation
-                    if item['type', ''] in _UNLOCK_ITEMS:
-                        editor_section = item.find_key("Editor", [])
-                        editor_section['deletable'] = '1'
-                        editor_section['copyable'] = '1'
-                        editor_section['DesiredFacing'] = 'DESIRES_UP'
-
-            for item_prop in editoritems.find_all('Item'):
-                improve_item(item_prop)
+                    if item.id in _UNLOCK_ITEMS:
+                        all_items[i] = item = copy.copy(item)
+                        item.deletable = item.copiable = True
+                        item.facing = editoritems.DesiredFacing.UP
 
             LOGGER.info('Editing Gameinfo...')
             self.edit_gameinfo(True)
@@ -796,19 +810,17 @@ class Game:
                 self.edit_fgd(True)
             export_screen.step('EXP')
 
-            LOGGER.info('Writing instance list...')
-            with open(self.abs_path('bin/bee2/instances.cfg'), 'w', encoding='utf8') as inst_file:
-                for line in self.build_instance_data(editoritems):
-                    inst_file.write(line)
+            # atomicwrites writes to a temporary file, then renames in one step.
+            # This ensures editoritems won't be half-written.
+            LOGGER.info('Writing Editoritems script...')
+            with atomic_write(self.abs_path('portal2_dlc2/scripts/editoritems.txt'), overwrite=True, encoding='utf8') as editor_file:
+                editoritems.Item.export(editor_file, all_items, renderables)
             export_screen.step('EXP')
 
-            # AtomicWriter writes to a temporary file, then renames in one step.
-            # This ensures editoritems won't be half-written.
-            LOGGER.info('Writing Editoritems...')
-            with srctools.AtomicWriter(self.abs_path(
-                    'portal2_dlc2/scripts/editoritems.txt')) as editor_file:
-                for line in editoritems.export():
-                    editor_file.write(line)
+            LOGGER.info('Writing Editoritems database...')
+            with open(self.abs_path('bin/bee2/editor.bin'), 'wb') as inst_file:
+                pick = pickletools.optimize(pickle.dumps(all_items))
+                inst_file.write(pick)
             export_screen.step('EXP')
 
             LOGGER.info('Writing VBSP Config!')
@@ -862,10 +874,21 @@ class Game:
                 self.refresh_cache(music_files)
 
             LOGGER.info('Optimizing editor models...')
-            self.clean_editor_models(editoritems)
+            self.clean_editor_models(all_items)
             export_screen.step('EXP')
 
+            LOGGER.info('Writing fizzler sides...')
             self.generate_fizzler_sides(vbsp_config)
+            resource_gen.make_cube_colourizer_legend(Path(self.abs_path('bee2')))
+            export_screen.step('EXP')
+
+            # Write generated resources, after the regular ones have been copied.
+            for filename, data in resources.items():
+                LOGGER.info('Writing {}...', filename)
+                loc = Path(self.abs_path(filename))
+                loc.parent.mkdir(parents=True, exist_ok=True)
+                with loc.open('wb') as f:
+                    f.write(data)
 
             if self.steamID == utils.STEAM_IDS['APERTURE TAG']:
                 os.makedirs(self.abs_path('sdk_content/maps/instances/bee2/'), exist_ok=True)
@@ -877,7 +900,7 @@ class Game:
         except loadScreen.Cancelled:
             return False, False
 
-    def clean_editor_models(self, editoritems: Property):
+    def clean_editor_models(self, items: Iterable[editoritems.Item]) -> None:
         """The game is limited to having 1024 models loaded at once.
 
         Editor models are always being loaded, so we need to keep the number
@@ -888,12 +911,10 @@ class Game:
         force_on = GEN_OPTS.get_bool('Debug', 'force_all_editor_models')
 
         used_models = {
-            mdl.value.rsplit('.', 1)[0].casefold()
-            for mdl in
-            editoritems.find_all(
-                'Item', 'Editor', 'Subtype',
-                'Model', 'ModelName',
-            )
+            str(mdl.with_suffix('')).casefold()
+            for item in items
+            for subtype in item.subtypes
+            for mdl in subtype.models
         }
 
         mdl_count = 0
@@ -936,124 +957,9 @@ class Game:
         else:
             LOGGER.warning('No custom editor models!')
 
-    @staticmethod
-    def build_instance_data(editoritems: Property):
-        """Build a property tree listing all of the instances for each item.
-        as well as another listing the input and output commands.
-        VBSP uses this to reduce duplication in VBSP_config files.
-
-        This additionally strips custom instance definitions from the original
-        list.
-        """
-        instance_locs = Property("AllInstances", [])
-        cust_inst = Property("CustInstances", [])
-        commands = Property("Connections", [])
-        item_classes = Property("ItemClasses", [])
-        item_embeds = Property("ItemEmbeds", [])
-        root_block = Property(None, [
-            instance_locs,
-            item_classes,
-            item_embeds,
-            cust_inst,
-            commands,
-        ])
-
-        # Produce the VMF output command we want - all PeTI outputs are simply
-        # just the input part, no delays, counts, parameter or target instance.
-        # so make those blank.
-        output_format = ',{},,0.0,-1'.replace(',', Output.SEP).format
-
-        def conv_peti_input(block: Property, key: str, name: str):
-            """Do comm_block[key] = block[name], but convert the formats.
-
-            comm_block expects a full VMF output value, but PeTI just has the IO
-            component (instance:x;blah).
-            """
-            if key in block:
-                # Do not add from editoritems if the new style is set.
-                return
-            try:
-                full_value = output_format(block[name])
-            except IndexError:  # No key
-                pass
-            else:
-                comm_block.append(Property(key, full_value))
-
-        for item in editoritems.find_all("Item"):
-            item_id = item['Type']
-
-            instance_block = Property(item_id, [])
-            instance_locs.append(instance_block)
-
-            for inst_block in item.find_all("Exporting", "instances"):
-                inst_props = list(inst_block)
-                inst_block.clear()
-                for inst in inst_props:
-                    if inst.name.isdigit():
-                        # Direct Portal 2 value
-                        instance_block.append(
-                            Property('Instance', inst['Name'])
-                        )
-                        # Put it back into the block.
-                        inst_block.append(inst)
-                    else:
-                        # Allow the name to start with 'bee2_' also to match
-                        # the <> definitions - it's ignored though.
-                        name = inst.name
-                        if name[:5] == 'bee2_':
-                            name = name[5:]
-
-                        cust_inst.set_key(
-                            (item_id, name),
-                            # Allow using either the normal block format,
-                            # or just providing the file - we don't use the
-                            # other values.
-                            inst['name'] if inst.has_children() else inst.value,
-                        )
-
-            # Write out the embeddedvoxel data.
-            # We offset it by -128 Z, since that's the actual offset from
-            for embed_prop in item.find_children("Exporting", "EmbeddedVoxels"):
-                try:
-                    if embed_prop.name == 'volume':
-                        value = '{}:{}'.format(
-                            embed_prop['pos1'],
-                            embed_prop['pos2'],
-                        )
-                    elif embed_prop.name == 'voxel':
-                        value = embed_prop['pos']
-                    else:
-                        raise ValueError(
-                            f'Unknown embed type "{embed_prop.real_name}" in '
-                            f'item {item_id}!'
-                        )
-                except LookupError:
-                    raise ValueError(
-                        f'Bad EmbeddedVoxel data in item {item_id}!'
-                    )
-                item_embeds.append(Property(item_id, value))
-
-            comm_block = Property(item['Type'], [])
-
-            (
-                has_input,
-                has_output,
-                has_secondary,
-            ) = packageLoader.Item.convert_item_io(comm_block, item, conv_peti_input)
-
-            # Record the itemClass for each item type.
-            # 'ItemBase' is the default class.
-            item_classes[item_id] = item['ItemClass', 'ItemBase']
-
-            # Only add the block if the item actually has IO.
-            if has_input or has_secondary or has_output:
-                commands.append(comm_block)
-
-        return root_block.export()
-
     def generate_fizzler_sides(self, conf: Property):
         """Create the VMTs used for fizzler sides."""
-        fizz_colors = {}
+        fizz_colors: dict[Vec_tuple, tuple[float, str]] = {}
         mat_path = self.abs_path('bee2/materials/bee2/fizz_sides/side_color_')
         for brush_conf in conf.find_all('Fizzlers', 'Fizzler', 'Brush'):
             fizz_color = brush_conf['Side_color', '']
@@ -1081,7 +987,7 @@ class Game:
         """Try and launch the game."""
         webbrowser.open('steam://rungameid/' + str(self.steamID))
 
-    def copy_mod_music(self) -> Set[str]:
+    def copy_mod_music(self) -> set[str]:
         """Copy music files from Tag and PS:Mel.
 
         This returns a list of all the paths it copied to.
@@ -1275,75 +1181,6 @@ def scan_music_locs():
 
         if MUSIC_MEL_VPK is not None and found_tag:
             break
-
-
-def improve_item(item: Property) -> None:
-    """Improve editoritems formats in various ways.
-
-    This operates inplace.
-    """
-    # OccupiedVoxels does not allow specifying 'volume' regions like
-    # EmbeddedVoxel. Implement that.
-
-    # First for 32^2 cube sections.
-    for voxel_part in item.find_all("Exporting", "OccupiedVoxels", "SurfaceVolume"):
-        if 'subpos1' not in voxel_part or 'subpos2' not in voxel_part:
-            LOGGER.warning(
-                'Item {} has invalid OccupiedVoxels part '
-                '(needs SubPos1 and SubPos2)!',
-                item['type'],
-            )
-            continue
-        voxel_part.name = "Voxel"
-        pos_1 = None
-        voxel_subprops = list(voxel_part)
-        voxel_part.clear()
-        for prop in voxel_subprops:
-            if prop.name not in ('subpos', 'subpos1', 'subpos2'):
-                voxel_part.append(prop)
-                continue
-            pos_2 = Vec.from_str(prop.value)
-            if pos_1 is None:
-                pos_1 = pos_2
-                continue
-
-            bbox_min, bbox_max = Vec.bbox(pos_1, pos_2)
-            pos_1 = None
-            for pos in Vec.iter_grid(bbox_min, bbox_max):
-                voxel_part.append(Property(
-                    "Surface", [
-                        Property("Pos", str(pos)),
-                    ])
-                )
-        if pos_1 is not None:
-            LOGGER.warning(
-                'Item {} has only half of SubPos bbox!',
-                item['type'],
-            )
-
-    # Full blocks
-    for occu_voxels in item.find_all("Exporting", "OccupiedVoxels"):
-        for voxel_part in list(occu_voxels.find_all("Volume")):
-            del occu_voxels['Volume']
-
-            if 'pos1' not in voxel_part or 'pos2' not in voxel_part:
-                LOGGER.warning(
-                    'Item {} has invalid OccupiedVoxels part '
-                    '(needs Pos1 and Pos2)!',
-                    item['type']
-                )
-                continue
-            voxel_part.name = "Voxel"
-            bbox_min, bbox_max = Vec.bbox(
-                voxel_part.vec('pos1'),
-                voxel_part.vec('pos2'),
-            )
-            del voxel_part['pos1']
-            del voxel_part['pos2']
-            for pos in Vec.iter_grid(bbox_min, bbox_max):
-                new_part = voxel_part.copy()
-                new_part['Pos'] = str(pos)
-                occu_voxels.append(new_part)
 
 
 def make_tag_coop_inst(tag_loc: str):

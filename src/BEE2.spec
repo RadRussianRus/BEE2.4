@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 import srctools
 import contextlib
@@ -36,7 +37,10 @@ def do_localisation():
         msgid_bugs_address='https://github.com/BEEmod/BEE2.4/issues',
     )
 
-    extracted = babel.messages.extract.extract_from_dir('.')
+    extracted = babel.messages.extract.extract_from_dir(
+        '.',
+        comment_tags=['i18n:'],
+    )
     for filename, lineno, message, comments, context in extracted:
         catalog.add(
             message,
@@ -128,6 +132,8 @@ EXCLUDES = [
     'idlelib.tabbedpages',
     'idlelib.textView',
 
+    'numpy',  # PIL.ImageFilter imports, we don't need NumPy!
+
     'bz2',  # We aren't using this compression format (shutil, zipfile etc handle ImportError)..
 
     'sqlite3',  # Imported from aenum, but we don't use that enum subclass.
@@ -143,20 +149,9 @@ EXCLUDES = [
     'argparse',
 ]
 
-
-# AVbin is needed to read OGG files.
-INCLUDE_PATHS = [
-    'C:/Windows/system32/avbin.dll',  # Win 32 bit
-    'C:/Windows/sysWOW64/avbin64.dll',  # Win 64 bit
-    '/usr/local/lib/libavbin.dylib',  # OS X
-    '/usr/lib/libavbin.so',  # Linux
-]
-
-# Filter out files for other platforms
-INCLUDE_LIBS = [
-    (path, '.') for path in INCLUDE_PATHS
-    if os.path.exists(path)
-]
+if sys.version_info >= (3, 7):
+    # Only needed on 3.6, it's in the stdlib thereafter.
+    EXCLUDES += ['importlib_resources']
 
 bee_version = input('BEE2 Version (x.y.z): ')
 
@@ -178,13 +173,15 @@ for snd in os.listdir('../sounds/'):
         continue
     data_files.append(('../sounds/' + snd, 'sounds'))
 
+# Include the compiler, picking the right architecture.
+bitness = 64 if sys.maxsize > (2**33) else 32
+data_files.append((f'../dist/{bitness}bit/compiler/', 'compiler'))
 
 # Finally, run the PyInstaller analysis process.
 
 bee2_a = Analysis(
     ['BEE2_launch.pyw'],
     pathex=[workpath, os.path.dirname(srctools.__path__[0])],
-    binaries=INCLUDE_LIBS,
     datas=data_files,
     hiddenimports=[
         'PIL._tkinter_finder',

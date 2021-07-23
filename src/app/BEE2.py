@@ -4,7 +4,7 @@ from BEE2_config import GEN_OPTS
 
 from app import gameMan, paletteLoader, UI, music_conf, logWindow, img, TK_ROOT
 import loadScreen
-import packageLoader
+import packages
 import utils
 import srctools.logger
 
@@ -57,10 +57,8 @@ loadScreen.show_main_loader(GEN_OPTS.get_bool('General', 'compact_splash'))
 if utils.MAC:
     TK_ROOT.lift()
 
-logWindow.init(
-    GEN_OPTS.get_bool('Debug', 'show_log_win'),
-    GEN_OPTS['Debug']['window_log_level']
-)
+logWindow.HANDLER.set_visible(GEN_OPTS.get_bool('Debug', 'show_log_win'))
+logWindow.HANDLER.setLevel(GEN_OPTS['Debug']['window_log_level'])
 
 LOGGER.debug('Loading settings...')
 
@@ -73,7 +71,7 @@ gameMan.set_game_by_name(
 gameMan.scan_music_locs()
 
 LOGGER.info('Loading Packages...')
-pack_data, package_sys = packageLoader.load_packages(
+package_sys = packages.load_packages(
     GEN_OPTS['Directories']['package'],
     loader=loadScreen.main_loader,
     log_item_fallbacks=GEN_OPTS.get_bool(
@@ -89,11 +87,12 @@ pack_data, package_sys = packageLoader.load_packages(
 )
 
 # Load filesystems into various modules
-music_conf.load_filesystems(package_sys)
+music_conf.load_filesystems(package_sys.values())
 img.load_filesystems(package_sys)
-gameMan.load_filesystems(package_sys)
+gameMan.load_filesystems(package_sys.values())
 
-UI.load_packages(pack_data)
+UI.load_packages()
+loadScreen.main_loader.step('UI')
 LOGGER.info('Done!')
 
 LOGGER.info('Loading Palettes...')

@@ -247,8 +247,8 @@ def save_pist(key, val):
         # Only play when we've actually changed.
         sound.fx_blockable('move')
 
-    values['toplevel'] = start_pos = top_wid.get()
-    values['bottomlevel'] = end_pos = btm_wid.get()
+    values['toplevel'] = start_pos = int(top_wid.get())
+    values['bottomlevel'] = end_pos = int(btm_wid.get())
 
     values['startup'] = srctools.bool_as_int(start_pos > end_pos)
     out_values['toplevel'] = str(max(start_pos, end_pos))
@@ -298,7 +298,7 @@ def exit_win(e=None) -> None:
 
     if contextWin.is_open:
         # Restore the context window if we hid it earlier.
-        contextWin.prop_window.deiconify()
+        contextWin.window.deiconify()
 
 
 def can_edit(prop_list):
@@ -612,7 +612,7 @@ def show_window(used_props, parent, item_name):
 
     if contextWin.is_open:
         # Temporarily hide the context window while we're open.
-        contextWin.prop_window.withdraw()
+        contextWin.window.withdraw()
 
 
 # load the window if directly executing this file

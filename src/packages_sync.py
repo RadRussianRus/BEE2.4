@@ -31,7 +31,7 @@ from typing import List, Optional
 import shutil
 
 from BEE2_config import GEN_OPTS
-from packageLoader import (
+from packages import (
     packages as PACKAGES,
     find_packages,
     LOGGER as packages_logger
@@ -76,7 +76,7 @@ def get_package(file: Path) -> RawFileSystem:
             pack_id = last_package
 
         try:
-            fsys = PACKAGES[pack_id].fsys
+            fsys = PACKAGES[pack_id.casefold()].fsys
         except KeyError:
             continue
         else:

@@ -6,7 +6,10 @@ from precomp.conditions import (
     DIRECTIONS,
 )
 from precomp import tiling, brushLoc
-from srctools import Vec, Entity, Property
+from srctools import (
+    Vec, Angle, Matrix, conv_float,
+    NoKeyError, Property, Entity,
+)
 from srctools.logger import get_logger
 
 
@@ -80,7 +83,7 @@ def brush_at_loc(
     and a set of all types found.
     """
     origin = Vec.from_str(inst['origin'])
-    angles = Vec.from_str(inst['angles'])
+    angles = Angle.from_str(inst['angles'])
 
     # Allow using pos1 instead, to match pos2.
     pos = props.vec('pos1' if 'pos1' in props else 'pos')
@@ -88,7 +91,7 @@ def brush_at_loc(
 
     pos.localise(origin, angles)
 
-    norm = props.vec('dir', 0, 0, 1).rotate(*angles)
+    norm: Vec = round(props.vec('dir', 0, 0, 1) @ angles, 6)
 
     if props.bool('gridpos') and norm is not None:
         for axis in 'xyz':
@@ -109,7 +112,7 @@ def brush_at_loc(
         pos2.z -= 64  # Subtract so origin is the floor-position
         pos2.localise(origin, angles)
 
-        bbox_min, bbox_max = Vec.bbox(pos, pos2)
+        bbox_min, bbox_max = Vec.bbox(round(pos, 6), round(pos2, 6))
 
         white_count = black_count = 0
 
@@ -379,11 +382,25 @@ def flag_blockpos_type(inst: Entity, flag: Property):
 
 
 @make_result('SetBlock')
-def res_set_block(inst: Entity, res: Property):
-    """Set a block to the given value.
+def res_set_block(inst: Entity, res: Property) -> None:
+    """Set a block to the given value, overwriting the existing value.
 
-    This should be used only if you know what is in the position.
-    The offset is in block increments, with `0 0 0` equal to the mounting surface.
+    - `type` is the type of block to set:
+        * `VOID` (Outside the map)
+        * `SOLID` (Full wall cube)
+        * `EMBED` (Hollow wall cube)
+        * `AIR` (Inside the map, may be occupied by items)
+        * `OCCUPIED` (Known to be occupied by items)
+        * `PIT_SINGLE` (one-high)
+        * `PIT_TOP`
+        * `PIT_MID`
+        * `PIT_BOTTOM`
+        * `GOO_SINGLE` (one-deep goo)
+        * `GOO_TOP` (goo surface)
+        * `GOO_MID`
+        * `GOO_BOTTOM` (floor)
+    - `offset` is in block increments, with `0 0 0` equal to the mounting surface.
+    - If 'offset2' is also provided, all positions in the bounding box will be set.
     """
     try:
         new_vals = brushLoc.BLOCK_LOOKUP[res['type'].casefold()]
@@ -393,10 +410,20 @@ def res_set_block(inst: Entity, res: Property):
     try:
         [new_val] = new_vals
     except ValueError:
-        raise ValueError("Can't use compound block types ({})!".format(res['type']))
+        # TODO: This could spread top/mid/bottom through the bbox...
+        raise ValueError(
+            f'Can\'t use compound block type "{res["type"]}", specify '
+            "_SINGLE/TOP/MID/BOTTOM"
+        )
 
-    pos = resolve_offset(inst, res['offset', '0 0 0'], scale=128, zoff=-128)
-    brushLoc.POS['world': pos] = new_val
+    pos1 = resolve_offset(inst, res['offset', '0 0 0'], scale=128, zoff=-128)
+
+    if 'offset2' in res:
+        pos2 = resolve_offset(inst, res['offset2', '0 0 0'], scale=128, zoff=-128)
+        for pos in Vec.iter_grid(*Vec.bbox(pos1, pos2), stride=128):
+            brushLoc.POS['world': pos] = new_val
+    else:
+        brushLoc.POS['world': pos1] = new_val
 
 
 @make_result('forceUpright')
@@ -406,17 +433,33 @@ def res_force_upright(inst: Entity):
     The result angle will have pitch and roll set to 0. Vertical
     instances are unaffected.
     """
-    normal = Vec(0, 0, 1).rotate_by_str(inst['angles'])
+    normal = Vec(0, 0, 1) @ Angle.from_str(inst['angles'])
     if normal.z != 0:
         return
     ang = math.degrees(math.atan2(normal.y, normal.x))
     inst['angles'] = '0 {:g} 0'.format(ang % 360)  # Don't use negatives
 
 
+@make_result('switchOrientation')
+def res_alt_orientation(inst: Entity, res: Property) -> None:
+    """Apply an alternate orientation.
+
+    "wall" makes the attaching surface in the -X direction, making obs rooms,
+    corridors etc easier to place.
+    """
+    val = res.value.casefold()
+    if val == 'wall':
+        pose = Angle(-90, 180, 0)
+    else:
+        raise ValueError(f'Unknown orientation type "{res.value}"!')
+    pose @= Angle.from_str(inst['angles'])
+    inst['angles'] = pose
+
+
 @make_result('setAngles')
 def res_set_angles(inst: Entity, res: Property):
     """Set the orientation of an instance to a certain angle."""
-    inst['angles'] = res.value
+    inst['angles'] = inst.fixup.substitute(res.value)
 
 
 @make_result('OffsetInst', 'offsetinstance')
@@ -477,3 +520,32 @@ def res_calc_opposite_wall_dist(inst: Entity, res: Property):
         dist_off += 32
 
     inst.fixup[result_var] = (origin - opposing_pos).mag() + dist_off
+
+
+@make_result('RotateInst')
+def res_rotate_inst(inst: Entity, res: Property) -> None:
+    """Rotate the instance around an axis.
+
+    If `axis` is specified, it should be a normal vector and the instance will
+    be rotated `angle` degrees around it.
+    Otherwise, `angle` is a pitch-yaw-roll angle which is applied.
+    `around` can be a point (local, pre-rotation) which is used as the origin.
+    """
+    angles = Angle.from_str(inst['angles'])
+    if 'axis' in res:
+        orient = Matrix.axis_angle(
+            Vec.from_str(inst.fixup.substitute(res['axis'])),
+            conv_float(inst.fixup.substitute(res['angle'])),
+        )
+    else:
+        orient = Matrix.from_angle(Angle.from_str(inst.fixup.substitute(res['angle'])))
+
+    try:
+        offset = Vec.from_str(inst.fixup.substitute(res['around']))
+    except NoKeyError:
+        pass
+    else:
+        origin = Vec.from_str(inst['origin'])
+        inst['origin'] = origin + (-offset @ orient + offset) @ angles
+
+    inst['angles'] = (orient @ angles).to_angle()
